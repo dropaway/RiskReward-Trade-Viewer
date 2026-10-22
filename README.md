@@ -1,4 +1,4 @@
-# RiskReward Trade Viewer v3.2
+# RiskReward TradingView v3.2
 
 TradingView indicator written in **Pine Script v6** for visualizing LONG/SHORT trade plans imported from RiskReward mentor emails.
 
