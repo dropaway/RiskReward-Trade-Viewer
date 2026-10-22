@@ -1,0 +1,232 @@
+//@version=6
+indicator("RiskReward Trade Viewer v3.2 LONG/SHORT", overlay=true, max_boxes_count=10, max_lines_count=15, max_labels_count=20, max_bars_back=5000)
+
+// CSV: TICKER,YYYY-MM-DD,L|S,ENTRY,STOP,TARGET,NAME,TRADER_ID
+// Older 7-column CSV and RR1 pipe rows remain supported (group by name as fallback).
+// Grouping by Trader ID avoids merging different people with identical names.
+// Paste the TradingView Import lines from a RiskReward mentor email into the Trades field.
+// Example format: ORCL,2026-10-15,L,129.1,125,145,Trader Name,TR-00000001
+// No example trades are preloaded; the indicator starts with an empty trade list.
+string csv = input.text_area("", "Trades (paste TradingView Import)", group="TRADES", tooltip="Paste one trade per line from the TradingView Import block in a RiskReward mentor email. Format: TICKER,YYYY-MM-DD,L|S,ENTRY,STOP,TARGET,NAME,TRADER_ID")
+int firstTrade = input.int(1, "Person (first trade #)", minval=1, maxval=100, group="VIEW", tooltip="Number of the person's first trade in the grouped table. Next person # appears below the table.")
+int withinPerson = input.int(1, "Trade within person #", minval=1, maxval=100, group="VIEW", tooltip="1 = first trade of this person, 2 = second trade, etc.")
+float targetR = input.float(0, "Target (R multiple; 0 = imported TP)", minval=0, step=0.5, group="VIEW", tooltip="0 uses the Take Profit sent by RiskReward. For example 3 means a 3R target, without changing the imported trade data.")
+int boxDays = input.int(30, "Box width (calendar days)", minval=1, maxval=365, group="VIEW")
+string font = input.string("Normal", "Table text size", options=["Small", "Normal", "Large"], group="VIEW")
+float overrideEntry = input.float(0, "Entry override (0 = original)", minval=0, group="MENTOR")
+float overrideStop = input.float(0, "Stop override (0 = original)", minval=0, group="MENTOR")
+float overrideTarget = input.float(0, "Take Profit override (0 = original)", minval=0, group="MENTOR")
+float account = input.float(1000, "Illustrative account value", minval=1, group="ILLUSTRATIVE POSITION")
+float riskBudget = input.float(250, "Illustrative risk amount", minval=1, group="ILLUSTRATIVE POSITION")
+bool showTable = input.bool(true, "Show table", group="VIEW")
+
+shortTicker(string s) =>
+    array<string> a = str.split(str.upper(str.trim(s)), ":")
+    array.get(a, array.size(a) - 1)
+
+var table tb = table.new(position.top_right, 7, 20, border_width=1, frame_width=1, frame_color=color.gray)
+textSz = font == "Large" ? size.large : font == "Small" ? size.small : size.normal
+color bg = color.rgb(30, 42, 55)
+color rowBg = color.rgb(43, 54, 67)
+color activeBg = color.rgb(38, 94, 158)
+// Candle-price range currently visible on the chart. Recalculated when users scroll/zoom.
+var float visibleCandleLow = na
+var float visibleCandleHigh = na
+if barstate.isfirst
+    visibleCandleLow := na
+    visibleCandleHigh := na
+if time >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
+    visibleCandleLow := na(visibleCandleLow) ? low : math.min(visibleCandleLow, low)
+    visibleCandleHigh := na(visibleCandleHigh) ? high : math.max(visibleCandleHigh, high)
+
+if barstate.islast
+    table.clear(tb, 0, 0, 6, 19)
+    for b in box.all
+        box.delete(b)
+    for l in line.all
+        line.delete(l)
+    for lab in label.all
+        label.delete(lab)
+
+    array<string> names = array.new_string()
+    array<string> tickers = array.new_string()
+    array<string> dates = array.new_string()
+    array<string> sides = array.new_string()
+    array<float> entries = array.new_float()
+    array<float> stops = array.new_float()
+    array<float> targets = array.new_float()
+    array<string> people = array.new_string()
+    array<string> traderIds = array.new_string()
+    array<string> groupKeys = array.new_string()
+    array<string> peopleKeys = array.new_string()
+    array<string> peopleIds = array.new_string()
+    string allRows = csv
+    array<string> lines = str.split(str.replace_all(allRows, "\r", ""), "\n")
+    for i = 0 to math.min(array.size(lines) - 1, 99)
+        string rec = str.trim(array.get(lines, i))
+        if str.length(rec) > 0
+            bool old = str.startswith(rec, "RR1|")
+            array<string> p = str.split(rec, old ? "|" : ",")
+            if array.size(p) >= 7
+                string nm = str.trim(array.get(p, old ? 1 : 6))
+                string sym = str.trim(array.get(p, old ? 2 : 0))
+                string dt = str.trim(array.get(p, old ? 3 : 1))
+                string side = old ? "L" : str.upper(str.trim(array.get(p, 2)))
+                float en = str.tonumber(str.trim(array.get(p, old ? 4 : 3)))
+                float sl = str.tonumber(str.trim(array.get(p, old ? 5 : 4)))
+                float tp = str.tonumber(str.trim(array.get(p, old ? 6 : 5)))
+                string traderId = array.size(p) >= 8 ? str.trim(array.get(p, old ? 7 : 7)) : ""
+                string groupKey = str.length(traderId) > 0 ? "ID:" + str.upper(traderId) : "NAME:" + nm
+                if str.length(nm) > 0 and str.length(sym) > 0
+                    array.push(names, nm)
+                    array.push(tickers, sym)
+                    array.push(dates, dt)
+                    array.push(sides, side)
+                    array.push(entries, en)
+                    array.push(stops, sl)
+                    array.push(targets, tp)
+                    array.push(traderIds, traderId)
+                    array.push(groupKeys, groupKey)
+                    if not array.includes(peopleKeys, groupKey)
+                        array.push(peopleKeys, groupKey)
+                        array.push(people, nm)
+                        array.push(peopleIds, traderId)
+
+    array<int> order = array.new_int()
+    array<int> starts = array.new_int()
+    for personKey in peopleKeys
+        array.push(starts, array.size(order) + 1)
+        for j = 0 to array.size(names) - 1
+            if array.get(groupKeys, j) == personKey
+                array.push(order, j)
+
+    int groupNum = array.indexof(starts, firstTrade)
+    int groupStart = groupNum >= 0 ? array.get(starts, groupNum) : -1
+    int groupEnd = groupNum >= 0 ? (groupNum + 1 < array.size(starts) ? array.get(starts, groupNum + 1) - 1 : array.size(order)) : -1
+    int count = groupNum >= 0 ? groupEnd - groupStart + 1 : 0
+    int pickedNo = groupStart + withinPerson - 1
+    int idx = groupNum >= 0 and withinPerson <= count ? array.get(order, pickedNo - 1) : -1
+    string personName = groupNum >= 0 ? array.get(people, groupNum) : "No person"
+    string personId = groupNum >= 0 ? array.get(peopleIds, groupNum) : ""
+    string status = ""
+
+    if showTable
+        string personHeading = personName + (str.length(personId) > 0 ? " (" + personId + ")" : " (legacy name)")
+        table.cell(tb, 0, 0, personHeading + " · " + str.tostring(count) + " trades", bgcolor=bg, text_color=color.white, text_size=textSz)
+        table.merge_cells(tb, 0, 0, 6, 0)
+        array<string> headers = array.from("#", "Ticker", "Date", "Entry", "SL", "TP", "R/R")
+        for c = 0 to 6
+            table.cell(tb, c, 1, array.get(headers, c), bgcolor=bg, text_color=color.white, text_size=textSz)
+        int visibleRow = 2
+        if groupNum >= 0
+            for n = groupStart to groupEnd
+                if visibleRow <= 14
+                    int i = array.get(order, n - 1)
+                    float en = array.get(entries, i)
+                    float sl = array.get(stops, i)
+                    string dt = array.get(dates, i)
+                    string dtShort = str.length(dt) == 10 ? str.substring(dt, 8, 10) + "." + str.substring(dt, 5, 7) : dt
+                    float tp = array.get(targets, i)
+                    string rowSide = array.get(sides, i)
+                    bool rowLong = rowSide == "L" or rowSide == "LONG"
+                    bool rowShort = rowSide == "S" or rowSide == "SHORT"
+                    float rMultiple = not na(en) and not na(sl) and not na(tp) ? (rowLong and en > sl and tp > en ? (tp - en) / (en - sl) : rowShort and sl > en and en > tp ? (en - tp) / (sl - en) : na) : na
+                    string rrText = na(rMultiple) ? "—" : "1:" + str.tostring(rMultiple, "#.##")
+                    array<string> row = array.from(str.tostring(n), shortTicker(array.get(tickers, i)), dtShort, str.tostring(en, "#.##"), str.tostring(sl, "#.##"), str.tostring(tp, "#.##"), rrText)
+                    for c = 0 to 6
+                        table.cell(tb, c, visibleRow, array.get(row, c), bgcolor=n == pickedNo ? activeBg : rowBg, text_color=color.white, text_size=textSz)
+                    visibleRow += 1
+        string nextPerson = groupNum >= 0 and groupNum + 1 < array.size(starts) ? "Next person: #" + str.tostring(array.get(starts, groupNum + 1)) + " — " + array.get(people, groupNum + 1) : "Next person: —"
+        table.cell(tb, 0, 15, nextPerson, bgcolor=bg, text_color=color.orange, text_size=textSz)
+        table.merge_cells(tb, 0, 15, 6, 15)
+
+    if idx == -1
+        status := groupNum < 0 ? "Select an actual person first-trade #" : "Trade within person # out of range"
+    else
+        string sym = array.get(tickers, idx)
+        string dtext = array.get(dates, idx)
+        string side = array.get(sides, idx)
+        float originalEntry = array.get(entries, idx)
+        float originalStop = array.get(stops, idx)
+        float originalTarget = array.get(targets, idx)
+        float en = overrideEntry > 0 ? overrideEntry : originalEntry
+        float sl = overrideStop > 0 ? overrideStop : originalStop
+        bool isLong = side == "L" or side == "LONG"
+        bool isShort = side == "S" or side == "SHORT"
+        float tp = overrideTarget > 0 ? overrideTarget : (targetR > 0 ? (isLong ? en + (en - sl) * targetR : en - (sl - en) * targetR) : originalTarget)
+        bool symbolOK = shortTicker(sym) == str.upper(syminfo.ticker)
+        bool dateOK = str.length(dtext) == 10
+        int yy = na
+        int mm = na
+        int dd = na
+        if dateOK
+            yy := int(str.tonumber(str.substring(dtext, 0, 4)))
+            mm := int(str.tonumber(str.substring(dtext, 5, 7)))
+            dd := int(str.tonumber(str.substring(dtext, 8, 10)))
+            dateOK := not na(yy) and not na(mm) and not na(dd) and mm >= 1 and mm <= 12 and dd >= 1 and dd <= 31
+        bool priceOK = not na(en) and not na(sl) and not na(tp) and en > 0 and sl > 0 and tp > 0 and (isLong and sl < en and tp > en or isShort and sl > en and tp < en)
+        if not symbolOK
+            status := "Trade #" + str.tostring(pickedNo) + ": open " + shortTicker(sym) + " chart"
+        else if not isLong and not isShort
+            status := "Invalid direction: use L or S"
+        else if not dateOK
+            status := "Invalid trade date: YYYY-MM-DD"
+        else if not priceOK
+            status := isShort ? "Invalid SHORT levels: Target < Entry < Stop" : "Invalid LONG levels: Stop < Entry < Target"
+        else
+            int leftTime = na
+            float dayLow = na
+            float dayHigh = na
+            // The earliest loaded candle of the exact exchange-local date anchors the trade.
+            for off = 0 to math.min(bar_index, 4998)
+                bool matchDate = year(time[off], syminfo.timezone) == yy and month(time[off], syminfo.timezone) == mm and dayofmonth(time[off], syminfo.timezone) == dd
+                if matchDate
+                    leftTime := time[off]
+                    dayLow := na(dayLow) ? low[off] : math.min(dayLow, low[off])
+                    dayHigh := na(dayHigh) ? high[off] : math.max(dayHigh, high[off])
+            // Future-dated trades have no historical candle. Draw them at the planned date.
+            // Missing historical candles still show the original warning.
+            int plannedDateTime = timestamp(syminfo.timezone, yy, mm, dd, 0, 0)
+            bool planned = na(leftTime) and plannedDateTime > timenow
+            if planned
+                leftTime := plannedDateTime
+            if na(leftTime)
+                status := "No candle for " + dtext + " in loaded history"
+            else
+                int rightTime = leftTime + boxDays * 86400000
+                int midTime = leftTime + int(boxDays * 86400000 / 2)
+                float risk = math.abs(en - sl)
+                float reward = math.abs(tp - en)
+                float rr = reward / risk
+                // Illustrative cash-only sizing: never exceed available account value.
+                float qtyByRisk = math.floor(riskBudget / risk)
+                float qtyByCash = math.floor(account / en)
+                float qty = math.max(0, math.min(qtyByRisk, qtyByCash))
+                float gain = qty * reward
+                float loss = qty * risk
+                float pnl = qty * (isLong ? close - en : en - close)
+                box.new(leftTime, math.max(tp, en), rightTime, math.min(tp, en), xloc=xloc.bar_time, bgcolor=color.new(color.teal, 78), border_color=color.new(color.teal, 40))
+                box.new(leftTime, math.max(en, sl), rightTime, math.min(en, sl), xloc=xloc.bar_time, bgcolor=color.new(color.red, 80), border_color=color.new(color.red, 40))
+                line.new(leftTime, en, rightTime, en, xloc=xloc.bar_time, color=color.rgb(31, 97, 194), width=2)
+                line.new(leftTime, tp, rightTime, tp, xloc=xloc.bar_time, color=color.teal)
+                line.new(leftTime, sl, rightTime, sl, xloc=xloc.bar_time, color=color.red)
+                label.new(midTime, tp, "Target: " + str.tostring(reward, "#.##") + " (" + str.tostring(reward / en * 100, "#.##") + "%) " + str.tostring(gain, "#.##") + ", Amount: " + str.tostring(account + gain, "#.##"), xloc=xloc.bar_time, style=isLong ? label.style_label_down : label.style_label_up, color=color.teal, textcolor=color.white)
+                label.new(midTime, en, (planned ? "PLANNED · " : "") + (isShort ? "SHORT · " : "LONG · ") + "Illustrative P&L: " + str.tostring(pnl, "#.##") + ", Qty: " + str.tostring(qty, "#") + "\nRisk/reward ratio: " + str.tostring(rr, "#.##"), xloc=xloc.bar_time, style=label.style_label_center, color=color.rgb(207, 51, 75), textcolor=color.white)
+                label.new(midTime, sl, "Stop: " + str.tostring(risk, "#.##") + " (" + str.tostring(risk / en * 100, "#.##") + "%) " + str.tostring(loss, "#.##") + ", Amount: " + str.tostring(account - loss, "#.##"), xloc=xloc.bar_time, style=isLong ? label.style_label_up : label.style_label_down, color=color.red, textcolor=color.white)
+                status := (planned ? "PLANNED · " : "") + "#" + str.tostring(pickedNo) + " · " + personName + (str.length(personId) > 0 ? " (" + personId + ")" : "") + " · " + (isShort ? "SHORT" : "LONG") + " · " + shortTicker(sym) + " · " + dtext
+                // Inform the mentor when the whole position is outside the currently visible candles' price range.
+                // Keep all boxes/lines at their true prices; never shift them to fit the screen.
+                bool belowVisible = not na(visibleCandleLow) and math.max(en, math.max(sl, tp)) < visibleCandleLow
+                bool aboveVisible = not na(visibleCandleHigh) and math.min(en, math.min(sl, tp)) > visibleCandleHigh
+                if showTable and (belowVisible or aboveVisible)
+                    string directionHint = belowVisible ? "BELOW" : "ABOVE"
+                    table.cell(tb, 0, 16, "OFF-SCREEN " + directionHint + " visible candles · " + (isShort ? "SHORT" : "LONG") + " · Entry " + str.tostring(en, format.mintick) + " / SL " + str.tostring(sl, format.mintick) + " / TP " + str.tostring(tp, format.mintick) + " · R/R 1:" + str.tostring(rr, "#.##"), bgcolor=color.rgb(104, 78, 29), text_color=color.white, text_size=textSz)
+                    table.merge_cells(tb, 0, 16, 6, 16)
+                // An outside-day entry can be an intentional pending limit order.
+                if not planned and (en < dayLow or en > dayHigh)
+                    if showTable
+                        table.cell(tb, 0, 17, "Notice: Entry outside day's high/low (" + str.tostring(dayLow, format.mintick) + "–" + str.tostring(dayHigh, format.mintick) + ")", bgcolor=color.rgb(104, 78, 29), text_color=color.white, text_size=textSz)
+                        table.merge_cells(tb, 0, 17, 6, 17)
+    if showTable
+        table.cell(tb, 0, 18, status, bgcolor=color.rgb(26, 65, 75), text_color=color.white, text_size=textSz)
+        table.merge_cells(tb, 0, 18, 6, 18)
